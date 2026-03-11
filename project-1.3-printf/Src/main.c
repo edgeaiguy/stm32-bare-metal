@@ -17,6 +17,8 @@
  */
 
 #include <stdint.h>
+#include <stdarg.h>
+#include "../Inc/uart2.h"
 
 // RCC base address (from the memory map chapter). Note: end all hex address defines with UL (unsigned long)
 #define RCC_BASE  0x40023800UL
@@ -49,26 +51,49 @@
   #warning "FPU is not initialized, but the project is compiling for an FPU. Please initialize the FPU before use."
 #endif
 
+void uart2_init() {
+  // Set bit 0 in AHB1 bus to enable GPIOA clock. Note: this enables clock for PA0 - PA15
+  RCC_AHB1ENR |= (1 << 0);
+  // Set bit 3 in AHB1 bus to enable GPIOD clock. Note: this enables clock for PD0 - PD15
+  RCC_AHB1ENR |= (1 << 3);
+  // set bit 17 in the APB1 bus to enable USART2 clock
+  RCC_APB1ENR |= (1 << 17);
+  // Readback after clock enable (force CPU to wait for write to complete)
+  volatile unsigned int tmp = RCC_AHB1ENR; (void) tmp; // void tmp tells compiler to ignore unused var
+
+  GPIOA_MODER &= ~(0x3 << 4); // clear bits [5:4] for PA2 (USART2_TX)
+  GPIOA_MODER &= ~(0x3 << 6); // clear bits [7:6] for PA3 (USART2_RX)
+  GPIOA_MODER |= (0x2 << 4); // set PA2 to 10 (alternate function mode)
+  GPIOA_MODER |= (0x2 << 6); // set PA3 to 10 (alternate function mode) NOTE: not using yet
+
+  GPIOA_AFRL &= ~(0xF << 8); // clear bits [11:8] for AFRL2 --> do we need to clear these bits?
+  GPIOA_AFRL |= (0x7 << 8); // set AFRL2 to AF7 (USART2_TX)
+  GPIOA_AFRL &= ~(0xF << 12); // clear bits [15:12] for AFRL3
+  GPIOA_AFRL |= (0x7 << 12); // set AFRL3 to AF7 (USART2_RX) NOTE: not using yet
+}
+
 static void delay_ms(volatile uint32_t ms) {
   while (ms--) {
     for (volatile uint32_t i = 0; i < 40000; ++i) { __asm__("nop"); }
   }
 }
 
+/* perform UART tranmission */
 void uart2_write_byte(char ch) {
   // wait until TXE flag in SR is set (bit 7). then write ch to DR
   while (!(USART2_SR & (1 << 7))) {}
   USART2_DR = (unsigned char)ch;
 }
 
+/* loop through each character in a string for UART transmission */
 void uart2_write_string(const char *str) {
-  // loop through each character, call uart2_write_byte
   // note: *str is 'falsy' when hitting the null terminator ('\0'), ending the loop
   while (*str) {
     uart2_write_byte(*str++);
   }
 }
 
+/* convert int to ASCII for UART transmission */
 void uart2_write_int(int32_t value) {
   char buf[11]; // max: "-2147483648" = 10 chars + null
   int i = 0;
@@ -93,26 +118,13 @@ void uart2_write_int(int32_t value) {
   }
 }
 
+void uart2_write_hex(uint32_t value) {
+  //TODO
+}
+
 int main(void)
 {
-  // Set bit 0 in AHB1 bus to enable GPIOA clock. Note: this enables clock for PA0 - PA15
-  RCC_AHB1ENR |= (1 << 0);
-  // Set bit 3 in AHB1 bus to enable GPIOD clock. Note: this enables clock for PD0 - PD15
-  RCC_AHB1ENR |= (1 << 3);
-  // set bit 17 in the APB1 bus to enable USART2 clock
-  RCC_APB1ENR |= (1 << 17);
-  // Readback after clock enable (force CPU to wait for write to complete)
-  volatile unsigned int tmp = RCC_AHB1ENR; (void) tmp; // void tmp tells compiler to ignore unused var
-
-  GPIOA_MODER &= ~(0x3 << 4); // clear bits [5:4] for PA2 (USART2_TX)
-  GPIOA_MODER &= ~(0x3 << 6); // clear bits [7:6] for PA3 (USART2_RX)
-  GPIOA_MODER |= (0x2 << 4); // set PA2 to 10 (alternate function mode)
-  GPIOA_MODER |= (0x2 << 6); // set PA3 to 10 (alternate function mode) NOTE: not using yet
-
-  GPIOA_AFRL &= ~(0xF << 8); // clear bits [11:8] for AFRL2 --> do we need to clear these bits?
-  GPIOA_AFRL |= (0x7 << 8); // set AFRL2 to AF7 (USART2_TX)
-  GPIOA_AFRL &= ~(0xF << 12); // clear bits [15:12] for AFRL3
-  GPIOA_AFRL |= (0x7 << 12); // set AFRL3 to AF7 (USART2_RX) NOTE: not using yet
+  uart2_init(); // enable clocks and configure pins
 
   // set bits 24-30 to configure pins 12-15 (LEDs) of GPIOD to "general purpose output mode"
   for (int pin = 12; pin <=15; pin++) {
