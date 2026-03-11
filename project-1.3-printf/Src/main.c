@@ -78,7 +78,7 @@ static void delay_ms(volatile uint32_t ms) {
   }
 }
 
-/* perform UART tranmission */
+/* perform UART tranmission: 10 bits per transmission (start/stop bits + 1 byte of data)*/
 void uart2_write_byte(char ch) {
   // wait until TXE flag in SR is set (bit 7). then write ch to DR
   while (!(USART2_SR & (1 << 7))) {}
@@ -119,7 +119,11 @@ void uart2_write_int(int32_t value) {
 }
 
 void uart2_write_hex(uint32_t value) {
-  //TODO
+    uart2_write_string("0x");
+    for (int i = 7; i >= 0; i--) {
+        uint8_t nibble = (value >> (i * 4)) & 0xF;
+        uart2_write_byte(nibble < 10 ? nibble + '0' : (nibble - 10) + 'A');
+    }
 }
 
 int main(void)
@@ -145,6 +149,8 @@ int main(void)
         // set only the 'chosen' LED
         GPIOD_BSRR = leds[i];
         uart2_write_string("Hello from bare metal\r\n");
+        uart2_write_int(67);
+        uart2_write_hex(USART2_SR);
         delay_ms(20);
     }
   }
