@@ -69,6 +69,30 @@ void uart2_write_string(const char *str) {
   }
 }
 
+void uart2_write_int(int32_t value) {
+  char buf[11]; // max: "-2147483648" = 10 chars + null
+  int i = 0;
+  // handle negative
+  if (value < 0) {
+    uart2_write_byte('-');
+    value = -value;
+  }
+  // handle zero
+  if (value == 0) {
+    uart2_write_byte('0');
+    return;
+  }
+  // extract digits in reverse into buf
+  while (value > 0) {
+    buf[i++] = (value % 10) + '0'; // covert last digit into ASCII
+    value /= 10; // continuously divide by 10
+  }
+  // send in reverse (correct) order
+  while (i > 0) {
+    uart2_write_byte(buf[--i]);
+  }
+}
+
 int main(void)
 {
   // Set bit 0 in AHB1 bus to enable GPIOA clock. Note: this enables clock for PA0 - PA15
