@@ -1,5 +1,5 @@
 # Project name
-TARGET = led-blink
+TARGET = bare-metal-uart
 
 # Toolchain
 CC = arm-none-eabi-gcc

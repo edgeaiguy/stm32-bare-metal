@@ -1,5 +1,5 @@
 # Project name
-TARGET = led-blink
+TARGET = uart-printf
 
 # Toolchain
 CC = arm-none-eabi-gcc
