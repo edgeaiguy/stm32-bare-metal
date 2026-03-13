@@ -18,30 +18,14 @@
 
 #include <stdint.h>
 #include <stdarg.h>
-#include "../Inc/uart2.h"
-
-#define RCC_BASE  0x40023800UL // RCC base address (from the memory map chapter). Note: end all hex address defines with UL (unsigned long)
-#define RCC_AHB1ENR  (*(volatile unsigned int *)(RCC_BASE + 0x30)) // AHB1ENR is at offset 0x30. GPIOA/D lives here
-#define RCC_APB1ENR (*(volatile unsigned int *)(RCC_BASE + 0x40)) // APB1ENR is at offset 0x40. UART2 lives here.
-#define GPIOA_BASE 0x40020000UL // GPIOA base address. PA2 and PA3 (for UART comms) live here.
-#define GPIOD_BASE  0x40020C00UL // GPIOD base address (from memory map). LEDs live here. UL = unsigned long, compiler treats it as 32-bit value rather than signed integer
-#define USART2_BASE 0x40004400UL // USART2 base address (from memory map)
-#define GPIOA_MODER (*(volatile unsigned int *)(GPIOA_BASE + 0x00)) //GPIOA_MODER is the first register in GPIOA
-#define GPIOA_AFRL (*(volatile unsigned int *)(GPIOA_BASE + 0x20)) // also define the alternate function low register offset
-#define GPIOD_MODER (*(volatile unsigned int *)(GPIOD_BASE + 0x00))// GPIOD_MODER is the first register in GPIOD
-#define USART2_BRR (*(volatile unsigned int *)(USART2_BASE + 0x08)) // BRR (baud rate register)
-#define USART2_CR1 (*(volatile unsigned int *)(USART2_BASE + 0x0C)) // CR1 (control register 1)
-#define USART2_SR (*(volatile unsigned int *)(USART2_BASE + 0x00)) // SR (status register)
-#define USART2_DR (*(volatile unsigned int *)(USART2_BASE + 0x04)) // DR (data register)
-#define GPIOD_ODR (*(volatile unsigned int *)(GPIOD_BASE + 0x14)) // GPIOD_ODR (output data register) is at offset 0x14
-#define GPIOD_BSRR (*(volatile unsigned int *)(GPIOD_BASE + 0x18)) // GPIOD_BSRR (bit set/reset register) is at offset 0x18
-
+#include "stm32f407xx.h"
+#include "uart2.h"
 
 #if !defined(__SOFT_FP__) && defined(__ARM_FP)
   #warning "FPU is not initialized, but the project is compiling for an FPU. Please initialize the FPU before use."
 #endif
 
-void uart2_init() {
+void enable_configure_pins_init() {
   // Set bit 0 in AHB1 bus to enable GPIOA clock. Note: this enables clock for PA0 - PA15
   RCC_AHB1ENR |= (1 << 0);
   // Set bit 3 in AHB1 bus to enable GPIOD clock. Note: this enables clock for PD0 - PD15
@@ -70,114 +54,9 @@ static void delay_ms(volatile uint32_t ms) {
   }
 }
 
-/* perform UART tranmission: 10 bits per transmission (start/stop bits + 1 byte of data)*/
-void uart2_write_byte(char ch) {
-  // wait until TXE flag in SR is set (bit 7). then write ch to DR
-  while (!(USART2_SR & (1 << 7))) {}
-  USART2_DR = (unsigned char)ch;
-}
-
-/* loop through each character in a string for UART transmission */
-void uart2_write_string(const char *str) {
-  // note: *str is 'falsy' when hitting the null terminator ('\0'), ending the loop
-  while (*str) {
-    uart2_write_byte(*str++);
-  }
-}
-
-/* convert int to ASCII for UART transmission */
-void uart2_write_int(int32_t value) {
-  char buf[11]; // max: "-2147483648" = 10 chars + null
-  int i = 0;
-  // handle negative
-  if (value < 0) {
-    uart2_write_byte('-');
-    value = -value;
-  }
-  // handle zero
-  if (value == 0) {
-    uart2_write_byte('0');
-    return;
-  }
-  // extract digits in reverse into buf
-  while (value > 0) {
-    buf[i++] = (value % 10) + '0'; // covert last digit into ASCII
-    value /= 10; // continuously divide by 10
-  }
-  // send in reverse (correct) order
-  while (i > 0) {
-    uart2_write_byte(buf[--i]);
-  }
-}
-
-/* convert unsigned int to ASCII for UART transmission */
-void uart2_write_uint(uint32_t value) {
-  char buf[11]; // max: "-2147483648" = 10 chars + null
-  int i = 0;
-
-  // handle zero
-  if (value == 0) {
-    uart2_write_byte('0');
-    return;
-  }
-  // extract digits in reverse into buf
-  while (value > 0) {
-    buf[i++] = (value % 10) + '0'; // covert last digit into ASCII
-    value /= 10; // continuously divide by 10
-  }
-  // send in reverse (correct) order
-  while (i > 0) {
-    uart2_write_byte(buf[--i]);
-  }
-}
-
-void uart2_write_hex(uint32_t value) {
-    uart2_write_string("0x");
-    for (int i = 7; i >= 0; i--) {
-        uint8_t nibble = (value >> (i * 4)) & 0xF;
-        uart2_write_byte(nibble < 10 ? nibble + '0' : (nibble - 10) + 'A');
-    }
-}
-
-void uart2_printf(const char *fmt, ...) {
-  va_list args; // track position in argument list
-  va_start(args, fmt); // initialize args after fmt
-  // loop through the string
-  while (*fmt) {
-    if (*fmt == '%') {
-      fmt++; // skip past '%'
-      switch (*fmt) {
-        case 'd': // pull next arg as int
-          uart2_write_int(va_arg(args, int));
-          break;
-        case 'u': // pull next arg as unsigned int
-          uart2_write_uint(va_arg(args, unsigned int));
-          break;
-        case 'x': // pull next arg as uint32_t
-          uart2_write_hex(va_arg(args, uint32_t));  
-          break;
-        case 's': // pull next arg as string pointer
-            uart2_write_string(va_arg(args, char *));  
-            break;
-        case 'c': // pull next arg as char
-            uart2_write_byte((char)va_arg(args, int)); 
-            break;
-        case '%': // "%%" prints a literal %
-            uart2_write_byte('%');   
-            break;
-      }
-    } else {
-      uart2_write_byte(*fmt); // regular character ,pass through
-    }
-    fmt++;
-  }
-  
-  va_end(args); // clean up
-}
-
 int main(void)
 {
-  uart2_init(); // enable clocks and configure pins
+  enable_configure_pins_init(); // enable clocks and configure pins
 
   // set bits 24-30 to configure pins 12-15 (LEDs) of GPIOD to "general purpose output mode"
   for (int pin = 12; pin <=15; pin++) {
@@ -186,7 +65,7 @@ int main(void)
 
   USART2_BRR = 0x008B; // USARTDIV = 16 MHz / (16 * 115200) = 8.6805. mantissa = 0x0080, fraction = 0xB (0.6805 * 16). write directly into register
   USART2_CR1 |= (1 << 13) | (1 << 3); // enable UE (USART Enable) and TE (Transmitter Enable)
-  delay_ms(5000);
+  delay_ms(500);
   uart2_write_hex(USART2_SR);
   
   // create LED bitmask array

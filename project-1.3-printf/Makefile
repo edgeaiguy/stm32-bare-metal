@@ -9,7 +9,7 @@ OBJCOPY = arm-none-eabi-objcopy
 SIZE = arm-none-eabi-size
 
 # Sources
-C_SOURCES = Src/main.c Src/syscalls.c Src/sysmem.c
+C_SOURCES = Src/main.c Src/syscalls.c Src/sysmem.c Src/uart2.c
 ASM_SOURCES = Startup/startup_stm32f407vgtx.s
 
 # Linker script
@@ -20,7 +20,7 @@ MCU = -mcpu=cortex-m4 -mthumb -mfpu=fpv4-sp-d16 -mfloat-abi=hard
 
 # Compiler flags
 CFLAGS = $(MCU) -Wall -g -O0 -std=gnu11
-CFLAGS += -DSTM32F407xx
+CFLAGS += -DSTM32F407xx -I./Inc
 
 # Linker flags
 LDFLAGS = $(MCU) -T$(LDSCRIPT) --specs=nosys.specs -Wl,-Map=build/$(TARGET).map
