@@ -141,6 +141,9 @@ make flash
 picocom -b 115200 /dev/ttyUSB0
 ```
 
+# Expected Output
+![Terminal Output](images/terminal-output.png)
+
 ## What I Learned
 
 - **No separate hex type:** Hex, decimal, and binary are display formats, not data types. `0xFF` and `255` are identical bits in memory. The function determines how to display them.
