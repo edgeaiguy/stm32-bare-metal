@@ -1,176 +1,165 @@
-# Project 1.2: Bare-Metal UART on STM32F407 Discovery Board
+# Project 1.3: Minimal printf Implementation over UART
 
-Direct register-level UART configuration on the STM32F407VG — no HAL, no libraries, no CubeIDE. Every register write is derived from the reference manual and datasheet.
+A lightweight `uart2_printf` function built on top of the bare-metal UART driver from Project 1.2. Supports `%d`, `%u`, `%x`, `%s`, and `%c` format specifiers with zero standard library dependencies. This turns the UART channel into a real debugging tool for every future project.
 
 ## What This Project Does
 
-Configures USART2 on the STM32F407 Discovery Board (MB997E) to transmit serial data at 115200 baud over a CP2102 USB-to-serial adapter. The main loop toggles an LED and prints `"Hello from bare metal\r\n"` to a terminal on the host PC, providing both visual and serial confirmation that the firmware is running.
+Extends the Project 1.2 UART driver with formatted output functions: integer-to-ASCII conversion (decimal, unsigned, and hexadecimal), string formatting, and a variadic `uart2_printf` that combines them all. The main loop demonstrates each format specifier alongside the LED toggle from Project 1.1.
 
-## Signal Path
+## Why This Matters
 
-![UART Signal Path](images/uart_signal_path.svg)
+In Project 1.2, you could print hardcoded strings. Now you can print variable values — register contents, loop counters, sensor readings, error codes. For bare-metal development without a debugger attached, `uart2_printf` is your primary window into what the firmware is doing at runtime.
 
-```
-STM32F407VG          Dupont Wires        CP2102           USB        Ubuntu PC
-┌──────────┐        ┌───────────┐      ┌─────────┐      Cable     ┌──────────┐
-│ USART2   │        │           │      │ USB-to- │    ┌───────┐  │ picocom  │
-│  PA2(TX)─┼──────► │ TX → RXD ─┼─────►│ Serial  ├────┤  USB  ├──►-b 115200 │
-│  PA3(RX)─┼◄────── │ RX ← TXD ─┼◄────┤ Adapter │    └───────┘  │/dev/     │
-│  GND ────┼────────│ GND ──────┼──────┤ GND     │               │ ttyUSB0  │
-└──────────┘        └───────────┘      └─────────┘               └──────────┘
-```
+The standard library `printf` from `stdio.h` pulls in ~10-20KB of code and depends on heap allocation — unacceptable on a resource-constrained microcontroller. This implementation uses ~200 bytes of flash and zero heap.
 
-**Key detail:** TX connects to RXD, RX connects to TXD. The crossover is intentional — one side's transmit is the other side's receive.
+## New Functions
 
-## Hardware Setup
+### uart2_write_int(int32_t value)
 
-### Board
-- **STM32F407G-DISC1** (MB997E revision)
-- Running on default 16 MHz HSI (High-Speed Internal) oscillator
-- No PLL configuration — all buses at 16 MHz
+Converts a signed integer to its ASCII decimal representation and sends it over UART.
 
-### Serial Adapter
-- **CP2102 USB-to-TTL module** (HW-598A)
-- Connected via 3 female-to-female dupont wires to P1 header
+**The reverse-order problem:** Dividing by 10 and taking the remainder extracts digits from least-significant to most-significant (427 gives you 7, 2, 4). Solution: fill a buffer in reverse order, then send the buffer backwards.
 
-### Why CP2102 Instead of ST-LINK VCP?
-
-The Discovery board's ST-LINK/V2-A supports a Virtual COM Port (VCP), but the VCP pins (U2 pin 12 and 13) are **not connected** to the STM32F407's USART pins by default. Section 7.2.3 of UM1472 documents this limitation and suggests either flying wires to the IC pins or using an external USB-to-serial adapter.
-
-The IC pins on the ST-LINK chip (STM32F103, LQFP package) are 0.5mm pitch surface-mount leads — not practical for dupont connectors. A CP2102 adapter provides a clean connection directly to the P1 header pins with no soldering required.
-
-**Nucleo boards don't have this problem** — they route VCP to the target MCU's USART automatically.
-
-### Wiring
-
-| Discovery Board (P1) | CP2102 Module | Wire Color |
-|----------------------|---------------|------------|
-| PA2 (pin 14)         | RXD           | Purple     |
-| PA3 (pin 13)         | TXD           | Blue       |
-| GND (pin 1)          | GND           | White      |
-
-![Wiring Photo](images/uart_wiring.jpg)
-
-## Register-Level Configuration
-
-### 1. Clock Enables (RCC)
-
-Three clocks must be enabled before configuring any peripheral:
-
-| Register | Bit | Peripheral | Bus |
-|----------|-----|-----------|-----|
-| RCC_AHB1ENR (0x40023830) | Bit 0 | GPIOA | AHB1 |
-| RCC_AHB1ENR (0x40023830) | Bit 3 | GPIOD (LED) | AHB1 |
-| RCC_APB1ENR (0x40023840) | Bit 17 | USART2 | APB1 |
-
-**Why different buses?** GPIO requires fast access (AHB1, up to 168 MHz). USART2 runs at low speeds and sits on APB1 (max 42 MHz) to save power. At default HSI settings, all buses run at 16 MHz.
-
-### 2. GPIO Alternate Function (GPIOA)
-
-PA2 must be switched from its default GPIO mode to USART2_TX via alternate function mapping:
-
-**GPIOA_MODER** (0x40020000): Set bits [5:4] to `10` (alternate function mode)
-- Each pin gets 2 bits: `00`=input, `01`=output, `10`=alt function, `11`=analog
-- PA2 position: pin × 2 = bit 4
-
-**GPIOA_AFRL** (0x40020020): Set bits [11:8] to `0x7` (AF7 = USART2)
-- Each pin gets 4 bits in the alternate function register
-- PA2 position: pin × 4 = bit 8
-- AF7 mapping found in DS8626 Table 9 (Alternate Function Mapping)
-
-### 3. Baud Rate (USART2_BRR)
-
-**Formula:** `USARTDIV = f_clk / (16 × baud_rate)`
-
-```
-f_clk   = 16,000,000 Hz  (HSI, APB1 prescaler = 1)
-baud    = 115,200
-USARTDIV = 16,000,000 / (16 × 115,200) = 8.6805...
-
-Mantissa = 8       → bits [15:4]
-Fraction = 0.6805 × 16 = 10.888 ≈ 11 (0xB) → bits [3:0]
-
-BRR = (8 << 4) | 0xB = 0x008B
+```c
+void uart2_write_int(int32_t value) {
+    char buf[11]; // max: "-2147483648" = 10 chars + null
+    int i = 0;
+    if (value < 0) {
+        uart2_write_byte('-');
+        value = -value;
+    }
+    if (value == 0) {
+        uart2_write_byte('0');
+        return;
+    }
+    while (value > 0) {
+        buf[i++] = (value % 10) + '0';  // convert digit to ASCII
+        value /= 10;
+    }
+    while (i > 0) {
+        uart2_write_byte(buf[--i]);
+    }
+}
 ```
 
-### 4. USART Enable (USART2_CR1)
+**Key detail:** `+ '0'` converts an integer digit (0-9) to its ASCII character code ('0'=48, '1'=49, etc.).
 
-| Bit | Name | Value | Purpose |
-|-----|------|-------|---------|
-| 13  | UE   | 1     | USART Enable |
-| 3   | TE   | 1     | Transmitter Enable |
+### uart2_write_hex(uint32_t value)
 
-BRR must be set **before** enabling UE and TE.
+Prints a 32-bit value as an 8-digit hex string prefixed with `0x`. Always prints all 8 digits (zero-padded) because in embedded debugging, seeing `0x00000000` is meaningful — it confirms the register is clear, not that output was truncated.
 
-### 5. Transmit Functions
-
-`uart2_write_byte`: Polls TXE flag (bit 7 in USART_SR) until the transmit data register is empty, then writes one byte to USART_DR.
-
-`uart2_write_string`: Iterates through a null-terminated string, calling `uart2_write_byte` for each character.
-
-**Two-stage pipeline:** Writing to DR transfers the byte to an internal shift register that clocks bits out on the wire. DR is immediately free for the next byte — you don't wait for full transmission, only for DR to empty.
-
-## Documentation References
-
-| Document | Section | What I Used It For |
-|----------|---------|-------------------|
-| **RM0090** (Reference Manual) | §2.3 Memory Map | Base addresses: RCC, GPIOA, GPIOD, USART2 |
-| **RM0090** | §7 RCC | Clock enable registers (AHB1ENR, APB1ENR), HSI default |
-| **RM0090** | §8 GPIO | MODER and AFRL register layouts |
-| **RM0090** | §30 USART | BRR, CR1, SR, DR registers and baud rate formula |
-| **DS8626** (Datasheet) | Table 9 | PA2 → AF7 → USART2_TX pin mapping |
-| **UM1472** (Board Manual) | §7.2.3 | VCP not connected; CP2102 alternative documented |
-| **UM1472** | Table 7 | PA2/PA3 not used by other board peripherals |
-
-## Build and Flash
-
-```bash
-make          # Compile
-make flash    # Flash via OpenOCD + ST-LINK
-picocom -b 115200 /dev/ttyUSB0   # Open serial terminal
+```c
+void uart2_write_hex(uint32_t value) {
+    uart2_write_string("0x");
+    for (int i = 7; i >= 0; i--) {
+        uint8_t nibble = (value >> (i * 4)) & 0xF;
+        uart2_write_byte(nibble < 10 ? nibble + '0' : (nibble - 10) + 'A');
+    }
+}
 ```
 
-To exit picocom: `Ctrl-A` then `Ctrl-X`.
+**No buffer needed:** Unlike decimal, hex digits can be extracted most-significant first by shifting down from bit 28 to bit 0 in steps of 4. Each 4-bit nibble maps directly to one hex digit.
 
-## Terminal Output
+**There's no "hex type" in C.** `255`, `0xFF`, and `0b11111111` are the same bits in memory. Hex is just a human-readable display format — particularly useful for register values and addresses since they align with 4-bit boundaries.
+
+### uart2_printf(const char *fmt, ...)
+
+Parses a format string and dispatches to the appropriate write function for each `%` specifier. Uses C's variable argument mechanism (`stdarg.h`).
+
+| Specifier | Type | Use Case |
+|-----------|------|----------|
+| `%d` | int (signed) | Loop counters, signed sensor deltas |
+| `%u` | unsigned int | ADC readings, timer counts, buffer sizes |
+| `%x` | uint32_t | Register values, addresses, bit masks |
+| `%s` | char * | Status messages, labels |
+| `%c` | char | Single characters, delimiters |
+| `%%` | (literal) | Print a literal `%` |
+
+**Variable arguments:** `stdarg.h` provides `va_list`, `va_start`, `va_arg`, and `va_end`. These macros let the function accept any number of arguments after the format string. `va_arg(args, type)` pulls the next argument and interprets it as the given type. The order of `va_arg` calls must match the `%` specifiers — there's no type checking.
+
+**char promotes to int:** When `char` is passed as a variable argument, C automatically promotes it to `int`. That's why `%c` uses `va_arg(args, int)` and casts back to `char`.
+
+## Hardware Register Side Effect Discovery
+
+While testing `uart2_write_hex`, reading USART2_SR produced unexpected results:
+
+```c
+// Before any UART writes: SR = 0x000000C0 (TXE=1, TC=1 — idle state)
+uart2_write_hex(USART2_SR);  // prints 0x000000C0 ✓
+
+// After UART writes: SR = 0x00000000
+uart2_write_string("Hello\r\n");
+uart2_write_hex(USART2_SR);  // prints 0x00000000 — why?
+```
+
+**Root cause:** Reading SR followed by writing DR is a hardware-defined flag-clearing sequence. The `uart2_write_byte` function reads SR (to check TXE), then writes to DR — this clears status flags as a side effect. By the time `uart2_write_hex` reads SR again, the flags have been consumed by previous write cycles.
+
+**Solution:** Capture the register into a variable before any print calls touch it:
+
+```c
+uint32_t sr_snapshot = USART2_SR;  // capture before writes
+uart2_write_string("SR = ");
+uart2_write_hex(sr_snapshot);      // print the captured value
+```
+
+**Lesson:** Hardware registers don't behave like regular memory. Reading them can have side effects. The reference manual documents these behaviors per-register in the bit descriptions.
+
+## Code Organization
+
+This project introduced enough functions to warrant splitting into separate files:
 
 ```
-Hello from bare metal
-Hello from bare metal
-Hello from bare metal
-...
-```
-
-![Terminal Screenshot](images/terminal_output.png)
-
-## What I Learned
-
-- **Board manual vs chip manual:** The datasheet and reference manual describe the chip. The user manual describes the board — wiring, connectors, and what's actually connected. Choosing a USART is a board-level decision, not a chip-level one.
-- **VCP is not automatic:** I initially assumed USART2 routed through the ST-LINK debugger to my PC. UM1472 §7.2.3 clarified that the VCP pins aren't connected to the STM32F407 on the Discovery board. This led to using a CP2102 adapter instead.
-- **Pin muxing:** A single physical pin can serve many peripherals. The AFRL register selects which one. This is why you check the alternate function mapping table before choosing pins.
-- **Baud rate is a mutual agreement:** Both sides must be configured identically. The BRR register encodes a fixed-point clock divider — getting it wrong produces garbage in the terminal.
-- **Bus architecture matters for clock config:** GPIOA clock is on AHB1, USART2 clock is on APB1. Different enable registers for different buses. The bus speed also affects the baud rate calculation. The differing clock speeds on the different buses can be intrepeted like a highway system: AHB1 (fastest) is the interstate, APB2 (faster) is state highway, APB1 (slow) is a country road.
-- **The peripheral setup pattern repeats:** Enable clock → configure GPIO → configure peripheral → use it. This is the same sequence for I2C, SPI, timers, and every other peripheral.
-
-## Project Structure
-
-```
-project-1.2-uart/
-├── src/
-│   └── main.c
-├── include/
+project-1.3-printf/
+├── Src/
+│   ├── main.c          # Init + main loop
+│   └── uart2.c         # All UART functions
+├── Inc/
+│   └── uart2.h         # Function prototypes + USART2 defines
+│   └── stm32f407xx.h   # Register base addresses + register defines for the chip
 ├── startup/
 │   └── startup_stm32f407.s
 ├── linker/
 │   └── stm32f407.ld
 ├── Makefile
-├── images/
-│   ├── uart_signal_path.svg
-│   ├── uart_wiring.jpg
-│   └── terminal_output.png
 └── README.md
 ```
 
-## Previous Project
+**Header include path:** Instead of `#include "../Inc/uart2.h"`, add `-I./Inc` to CFLAGS in the Makefile. Then `#include "uart2.h"` works from any source file.
 
-- [Project 1.1: Bare-Metal LED Toggle](../project-1.1-led/README.md) — Direct register manipulation for GPIO output
+**Include guards:** Every header uses the `#ifndef`/`#define`/`#endif` pattern to prevent duplicate declarations if the header is included from multiple source files.
+
+## Makefile Changes from 1.2
+
+- Added `uart2.c` to source file list
+- Added `-I./Inc` to CFLAGS for header search path
+
+## Build and Test
+
+```bash
+make
+make flash
+picocom -b 115200 /dev/ttyUSB0
+```
+
+## What I Learned
+
+- **No separate hex type:** Hex, decimal, and binary are display formats, not data types. `0xFF` and `255` are identical bits in memory. The function determines how to display them.
+- **Hardware registers have read side effects:** The USART SR clear-on-read-then-write behavior surprised me. Always check the reference manual's bit descriptions — "cleared by a read to SR followed by a write to DR" is easy to miss.
+- **Snapshot registers before printing:** If you need to inspect a register value, capture it into a local variable first. Using `uart2_write_hex(USART2_SR)` directly may give stale results because the print functions themselves read SR internally.
+- **stdint.h has no runtime cost:** It's pure type definitions resolved at compile time. In embedded, you always want fixed-width types (`uint32_t` not `unsigned int`) because they make size guarantees explicit.
+- **Variable arguments are unsafe:** No type checking between format specifiers and actual arguments. Mismatched types produce garbage or crashes silently.
+- **Organize early:** Splitting UART code into its own .c/.h pair keeps main.c clean and makes the functions reusable across future projects by copying the files.
+
+## Documentation References
+
+| Document | Section | What I Used It For |
+|----------|---------|-------------------|
+| **RM0090** | §30 USART | SR flag-clearing behavior (read SR + write DR sequence) |
+| **C Standard** | stdarg.h | va_list, va_start, va_arg, va_end for variable arguments |
+| **C Standard** | stdint.h | Fixed-width types (uint32_t, int32_t, uint8_t) |
+| **ASCII Table** | — | Character code offsets: '0'=48, 'A'=65 |
+
+## Previous Projects
+
+- [Project 1.1: Bare-Metal LED Toggle](../project-1.1-led/README.md)
+- [Project 1.2: Bare-Metal UART](../project-1.2-uart/README.md)
